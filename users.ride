@@ -1,0 +1,181 @@
+{-# STDLIB_VERSION 6 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+{-# IMPORT artifacts/testnet.ride #-}
+
+#### VERSION 1.0.0 ####
+
+let VERSION = "1.0.0"
+
+# HELPERS
+func getStringByKey(key: String) = valueOrElse(getString(this, key), "")
+func getBooleanByKey(key: String) = valueOrElse(getBoolean(this, key), false)
+func getIntegerByKey(key: String) = valueOrElse(getInteger(this, key), 0)
+
+# ADMINS
+let chris = getStringByKey("conf_admin_1") 
+
+# CONFIG
+let dappRunningKey = "conf_dapp_is_running"
+let maintenanceMSGKey = "conf_maintenance_msg"
+let dappRunning = valueOrElse(getBoolean(this, dappRunningKey), true)
+let maintenanceMSG = valueOrElse(getString(this, maintenanceMSGKey), "")
+
+#user status
+let userRegistered = "REGISTERED" # have registered
+let userVerified = "VERIFIED" # is verified/allowed for homepage and search
+let userSuspended = "SUSPENDED" # is suspended
+let userChangeRequired = "CHANGE_REQUIRED" # user needs to edit his profile
+
+# KEYS USERS / user address
+func keyUserAddr(caller: String) = "user_"+caller
+func keyUserName(caller: String) = "user_name_"+caller
+func keyUserDesc(caller: String) = "user_desc_"+caller
+func keyUserSocial(caller: String) = "user_social_"+caller
+func keyUserThumb(caller: String) = "user_thumb_"+caller
+func keyUserStatus(caller: String) = "user_status_"+caller
+func keyUserDate(caller: String) = "user_date_"+caller
+
+func validateCID(cid: String) = { 
+    if cid.contains("/") then
+        size(cid) < 76 && size(cid.split("/")[0]) == 59 && size(cid.split("/")[1]) < 16
+    else false
+}
+
+func validUserData(caller: String, name: String, description: String, thumb: String, isAnUpdate: Boolean) = {
+    
+    let validCID = if(size(thumb) != 0) then validateCID(thumb) else true
+    if(!validCID) then throw("CID don't match requirement!") else
+
+    if(name == "" || description == "") then throw("Name and description cannot be empty") else
+    if(size(description) > 600) then throw("600 Char. max description") else
+    if(size(name) > 100) then throw("100 Char. max name") else
+
+    let status = getStringByKey(keyUserStatus(caller)) 
+    if(status == userSuspended) then throw("Account suspended.") else
+    
+    if(!isAnUpdate && status == userRegistered) then throw("Already registered") else
+    
+    if(isAnUpdate && status == "") then throw("Register first") else
+    true
+}
+
+func validateNewStatus(status: String, address: String, currentStatus: String) = {
+    let allStatus = [userVerified,userRegistered,userSuspended,userChangeRequired]
+    let statusToSet = if(allStatus.containsElement(status)) then status 
+    else throw("Unknown status")
+
+    let userIsRegistered = getIntegerByKey(keyUserDate(address))
+    if(userIsRegistered == 0) then throw("You cant set this status, user is not registered.")
+    else
+    statusToSet
+}
+
+func makeJSON(name: String, description: String, social: String, thumb: String, date: String) = {
+    "{\"user_name\": \""+name+"\", \"user_thumb\":\""+thumb+"\",\"user_date\":\""+date+"\"}"
+}
+
+@Callable(invoke)
+func setConf(key: String, val: String) = {
+  let caller = toString(invoke.caller)
+  # first set admin with dapp account
+  if([chris, toString(this)].containsElement(caller)) then
+    [
+      StringEntry(key, val)
+    ]
+  else throw("You are not allowed to change this")
+}
+
+# pause the dApp in case of emergency
+@Callable(invoke)
+func appRunning(isLive: Boolean, message: String) = {
+    let caller = toString(invoke.caller)
+    if([chris, toString(this)].containsElement(caller)) then
+      [
+        BooleanEntry(dappRunningKey, isLive),
+        StringEntry(maintenanceMSGKey, message)
+      ]
+    else throw("You are not allowed to change this")
+}
+
+@Callable(invoke)
+func registerUser(name: String, description: String, thumb: String, social: String) = {
+
+    if(!dappRunning) then throw(maintenanceMSG) else
+    let caller = toString(invoke.caller)
+    let id = toBase58String(invoke.transactionId)
+    let timestamp = lastBlock.timestamp
+
+    if(!validUserData(caller, name, description, thumb, false)) then throw("Something went wrong") else
+    let json = makeJSON(toBase64String(name.toBytes()), toBase64String(description.toBytes()), toBase64String(social.toBytes()), toBase64String(thumb.toBytes()), toString(timestamp)) 
+
+      [
+        IntegerEntry(keyUserDate(caller), timestamp),
+        StringEntry(keyUserAddr(caller), id+"_"+toString(timestamp)),
+        StringEntry(keyUserName(caller), name),
+        StringEntry(keyUserDesc(caller), description),
+        StringEntry(keyUserSocial(caller), social),
+        StringEntry(keyUserThumb(caller), thumb),
+        StringEntry(keyUserStatus(caller), userRegistered),
+        StringEntry(userRegistered+"_"+caller, json)
+      ]
+}
+
+# Only users that already created profile can update it if their status allow it
+@Callable(invoke)
+func updateUser(name: String, description: String, thumb: String, social: String) = {
+
+    if(!dappRunning) then throw(maintenanceMSG) else
+    let caller = toString(invoke.caller)
+    let status = getStringByKey(keyUserStatus(caller))
+
+    if(!validUserData(caller, name, description, thumb, true)) then throw("Something went wrong") else
+
+    let date = getIntegerByKey(keyUserDate(caller))
+    let json = makeJSON(toBase64String(name.toBytes()), toBase64String(description.toBytes()), toBase64String(social.toBytes()), toBase64String(thumb.toBytes()), toString(date))
+    
+        [
+            StringEntry(keyUserName(caller), name),
+            StringEntry(keyUserDesc(caller), description),
+            StringEntry(keyUserSocial(caller), social),
+            StringEntry(keyUserThumb(caller), thumb),
+            StringEntry(status+"_"+caller, json)
+        ]
+}
+
+@Callable(invoke)
+func changeUserStatus(address: String, status: String, note: String) = {
+
+    let caller = toString(invoke.caller)
+    let currentStatus = getStringByKey(keyUserStatus(address))
+
+    let statusToSet = validateNewStatus(status, address, currentStatus)
+
+    let name = toBase64String(getStringByKey(keyUserName(address)).toBytes())
+    let thumb = toBase64String(getStringByKey(keyUserThumb(address)).toBytes())
+    let description = toBase64String(getStringByKey(keyUserDesc(address)).toBytes())
+    let social = toBase64String(getStringByKey(keyUserSocial(address)).toBytes())
+    let date = getIntegerByKey(keyUserDate(address))
+    let json = makeJSON(name, description, social, thumb, toString(date))
+
+    if([chris, toString(this)].containsElement(caller)) then
+    [
+        StringEntry(keyUserStatus(address), statusToSet),
+        DeleteEntry(currentStatus+"_"+address),
+        StringEntry(statusToSet+"_"+address, json),
+        StringEntry("user_note_"+address, note)
+    ]
+    else throw("Not allowed to change user status")
+}
+
+
+# DEBUG ONLY
+@Callable(i)
+  func deleteEntry(entry: String) = {
+      let caller = toString(i.caller)
+      if(caller == chris) then
+      [
+         DeleteEntry(entry)
+      ]
+      else throw("no")
+ }

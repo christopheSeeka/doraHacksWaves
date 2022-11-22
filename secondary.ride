@@ -1,0 +1,344 @@
+{-# STDLIB_VERSION 6 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+{-# IMPORT artifacts/testnet.ride #-}
+
+#### SECONDARY MARKET ####
+let VERSION = "1.0.0"
+
+func getStrByK(key: String) =  valueOrElse(getString(this, key), "")
+func getIntByK(key: String) = valueOrElse(getInteger(this, key), 0)
+
+let feeReceiver = getStrByK("conf_fee_receiver") # account receiving commission
+let eventsDapp = value(addressFromString(getStrByK("conf_events_dapp"))) # sign-ticket dapp/data storage
+let userDapp = value(addressFromString(getStrByK("conf_users_dapp"))) # users dapp
+let signCut = getIntByK("conf_signcut")
+
+# ACCEPTED TOKENS 
+let signAssetId = fromBase58String(getStrByK("conf_accepted_asset_SIGN")) 
+
+# ADMINS
+let chris = getStrByK("conf_admin_1")
+
+# user status
+let userSuspended = "SUSPENDED" 
+
+# artwork status
+let eventIllegal = "ILLEGAL"
+let eventSuspended = "SUSPENDED"
+
+# GET CONFIG STATUS
+let dappRunningKey = "conf_dapp_is_running"
+let maintenanceMSGKey = "conf_maintenance_msg"
+let dappRunning = valueOrElse(getBoolean(this, dappRunningKey), true)
+let maintenanceMSG = valueOrElse(getString(this, maintenanceMSGKey), "")
+
+# KEY
+let numSalesK = "num_sales"
+func getUserStrByK(key: String) = valueOrElse(getString(userDapp, key), "Error")
+func getEventStrByK(key: String) = valueOrElse(getString(eventsDapp, key), "")
+func getEventIntByK(key: String) = valueOrElse(getInteger(eventsDapp, key), 0)
+
+func keyUserStatus(addr: String) = "user_status_"+addr
+func keyFlag(organizerAddr: String, eventId: String) = "event_flag_"+eventId+"_"+organizerAddr
+func keyNFTData(id: String) = "nft_"+id
+
+func getSaleKey(caller: String, ticketId: String, eventId: String, organizerAddr: String, nftId: String) = "sale2nd_info_"+caller+"_"+ticketId+"_"+eventId+"_"+organizerAddr+"_"+nftId
+func getBidKey(offerOwner: String, ticketId: String, saleOwner: String, offerId: String, nftId: String) = "offer2nd_"+offerOwner+"_"+ticketId+"_"+saleOwner+"_"+offerId+"_"+nftId
+
+### NEW ###
+
+func idCallerDate(i: Invocation) = {
+    if(!dappRunning) then throw(maintenanceMSG) else
+    (toBase58String(i.transactionId), toBase58String(i.caller.bytes), lastBlock.timestamp)
+}
+func isPayment(i: Invocation) = {
+    if(size(i.payments) == 0) then throw("No payment attached") else
+    let payment = value(i.payments[0])
+    let amount = value(payment.amount)
+    (payment, amount)
+}
+func assetIsValid(assetDetails: Asset) = {
+  (assetDetails.quantity == 1 && assetDetails.decimals == 0 && assetDetails.reissuable == false && assetDetails.issuer == eventsDapp)
+}
+
+func isSignEventNFT(id: ByteVector) = {
+    let assetDetails = value(assetInfo(id))
+    assetIsValid(assetDetails)
+}
+func acceptedAssetIds(assetId: String) = {
+    if(assetId != toBase58String(signAssetId)) then false else
+    true
+}
+func getBidAssetId(assetId: String ) = fromBase58String(assetId)
+func getSaleOwnerAndStatus(ticketId: String) = {
+    let saleOwner = getStrByK("current_owner_on_dapp_"+ticketId)
+    if(size(saleOwner) == 0) then throw("Ticket not found") else
+    let saleStatus = getStrByK("sale2nd_status_"+saleOwner+"_"+ticketId)
+    if(saleStatus != "OPEN") then throw("Ticket not for sale") else
+    saleOwner
+}
+func getBidData(key: String) = {
+    let bidData = getStrByK(key+"_OPEN")
+    if(bidData == "") then throw("Offer not found") else
+    let bidDataArr = bidData.split("_")
+    let assetId = getBidAssetId(bidDataArr[2]) 
+    (bidDataArr, assetId, bidData)
+}
+
+func eventIsValid(eventStatus: String) = {
+  (eventStatus != eventIllegal && eventStatus != eventSuspended)
+}
+
+func checkEventStatus(addr: String, id: String) = {
+    let eventStatus = getEventStrByK(keyFlag(addr, id))
+    if(eventIsValid(eventStatus)) then true else throw("Original event flagged as "+eventStatus) 
+}
+
+func checkOrganizerStatus(addr: String) = {
+    let organizerStatus = getUserStrByK(keyUserStatus(addr))
+    if([userSuspended].containsElement(organizerStatus)) then throw("Original organizer "+organizerStatus) else
+    true
+}
+
+func checkNFTInfo(assetId: String) = {
+    let nftData =  getEventStrByK(keyNFTData(assetId)).split("_")
+    if(!checkEventStatus(nftData[6], nftData[5]) && !checkOrganizerStatus(nftData[6])) then 
+        (false, nftData[6], nftData[7], nftData[5])
+    else
+        (true, nftData[6], nftData[7], nftData[5])
+}
+
+func checkEVENTExist(eventId: String, organizerAddr: String) = {
+    if(!checkEventStatus(organizerAddr, eventId) && !checkOrganizerStatus(organizerAddr)) then false else
+    true
+}
+
+func setTransfers(amount: Int, assetId: ByteVector|Unit, nftId: String, organizerAddr: String, saleOwner: String, caller: String, eventId: String, ticketId: String) = {
+    let organizerCut = getIntByK("ticket_royalties_"+eventId+"_"+organizerAddr+"_"+ticketId)
+    let amountForSign = fraction(amount, signCut, 100)
+    let amountForOrganizer = fraction(amount, organizerCut, 100)
+    let amountForOwner = amount - (amountForSign + amountForOrganizer) 
+
+     let commissions = 
+        [
+            ScriptTransfer(Address(fromBase58String(feeReceiver)), amountForSign, assetId)
+        ]
+
+    let organizerFee = ScriptTransfer(Address(fromBase58String(organizerAddr)), amountForOrganizer, assetId)
+    let ownerFee = ScriptTransfer(Address(fromBase58String(saleOwner)), amountForOwner, assetId)
+    let collectorNFT = ScriptTransfer(Address(fromBase58String(caller)), 1, fromBase58String(nftId))
+    
+    (commissions, organizerFee, ownerFee, collectorNFT)
+}
+
+func provideBaseData(i: Invocation, nftId: String) = {
+  let (id, caller, date) = idCallerDate(i)
+  let (isValidNFT, eventId, organizerAddr, ticketId) = checkNFTInfo(nftId)
+  (id, caller, date, isValidNFT, eventId, organizerAddr, ticketId)
+}
+
+func updateNumSales() = {
+    let numSales = getIntByK(numSalesK)
+    IntegerEntry(numSalesK, numSales+1)
+}
+
+@Callable(invoke)
+func setConf(key: String, val: String) = {
+  let caller = toString(invoke.caller)
+  # first set admin with dapp account
+  if([chris, toString(this)].containsElement(caller)) then
+    if(key.contains("conf_")) then
+      [
+        StringEntry(key, val)
+      ]
+    else throw("Entries starting with conf_ only")
+  else throw("You are not allowed to change this")
+}
+
+# pause the dApp in case of emergency
+@Callable(invoke)
+func appRunning(isLive: Boolean, message: String) = {
+
+    let caller = toString(invoke.caller)
+    let id = toBase58String(invoke.transactionId)
+
+    if([chris, toString(this)].containsElement(caller)) then
+      [
+        BooleanEntry(dappRunningKey, isLive),
+        StringEntry(maintenanceMSGKey, message)
+      ]
+    else throw("You are not allowed to change this")
+}
+# DIRECT SALE
+@Callable(i)
+func sellNFT(price: Int) = {
+
+    let (payment, amount) = isPayment(i)
+    if(amount != 1) then throw("No Ticket attached") else
+    let nftId = if(isDefined(payment.assetId) && isSignEventNFT(value(payment.assetId))) then toBase58String(value(payment.assetId)) else throw("Only SIGN Event NFT accepted.")
+
+    let (id, caller, date, isValidNFT, eventId, organizerAddr, ticketId) = provideBaseData(i, nftId)
+
+    if(!isValidNFT) then throw("Not a valid ticket") else
+
+    let resellLimitation = getEventIntByK("ticket_resellLimitation_"+eventId+"_"+organizerAddr+"_"+ticketId)
+    if(lastBlock.timestamp < resellLimitation) then throw("Resell is restrincted untill :"+toString(resellLimitation)) else 
+
+    [
+        StringEntry(
+            getSaleKey(caller,ticketId,eventId,organizerAddr,nftId)+"_OPEN", 
+            toString(date)+"_"+toString(price)+"_"+toBase58String(signAssetId)+"_"+nftId+"_"+ticketId+"_"+eventId+"_"+organizerAddr+"_"+id
+        ),
+        StringEntry("sale2nd_status_"+caller+"_"+nftId, "OPEN"),
+        StringEntry("current_owner_on_dapp_"+nftId, caller)
+    ] 
+}
+
+# EDIT SALE HERE
+@Callable(i)
+func updateSalePrice(nftId: String, price: Int) = {
+
+    let (id, caller, date, isValidNFT, eventId, organizerAddr, ticketId) = provideBaseData(i, nftId)
+
+    if(!isValidNFT) then throw("Not a valid ticket") else
+
+    let saleOwner = getStrByK("current_owner_on_dapp_"+nftId)
+    if(saleOwner != caller) then throw("You don't own this ticket") else
+
+    let saleStatus = getStrByK("sale2nd_status_"+caller+"_"+nftId)
+    if(saleStatus != "OPEN") then throw("Sale not active") else 
+
+    let saleKey = getSaleKey(caller,ticketId,eventId,organizerAddr, nftId)
+    let saleInfo = getStrByK(saleKey+"_OPEN").split("_")
+    [
+        StringEntry(
+            saleKey+"_OPEN", 
+            saleInfo[0]+"_"+toString(price)+"_"+toBase58String(signAssetId)+"_"+saleInfo[3]+"_"+saleInfo[4]+"_"+saleInfo[5]+"_"+saleInfo[6]+"_"+saleInfo[7]
+        )
+    ] 
+}
+
+@Callable(i)
+func cancelSale(nftId: String) = {
+    
+    let (id, caller, date, isValidNFT, eventId, organizerAddr, ticketId) = provideBaseData(i, nftId)
+
+    let saleOwner = getStrByK("current_owner_on_dapp_"+nftId)
+    if(saleOwner != caller) then throw("You don't own this ticket") else
+
+    let saleStatus = getStrByK("sale2nd_status_"+caller+"_"+nftId)
+    if(saleStatus != "OPEN") then throw("Sale not active") else
+    
+    let saleKey = getSaleKey(caller,ticketId,eventId,organizerAddr,nftId)
+    let saleInfo = getStrByK(saleKey+"_OPEN")
+
+    [
+        DeleteEntry(saleKey+"_OPEN"),
+        DeleteEntry("sale2nd_status_"+caller+"_"+nftId),
+        DeleteEntry("current_owner_on_dapp_"+nftId),
+        StringEntry(saleKey+"_"+id+"_CANCELLED", saleInfo+"_CANCELLED_"+toString(date)+"_"+id),
+        ScriptTransfer(Address(fromBase58String(caller)), 1, fromBase58String(nftId))
+    ] 
+}
+
+@Callable(i)
+func buyNFT(nftId: String) = {
+
+    let (id, caller, date, isValidNFT, eventId, organizerAddr, ticketId) = provideBaseData(i, nftId)
+    # check event exist?????
+    if(!isValidNFT) then throw("Not a valid ticket") else
+
+    let saleOwner = getSaleOwnerAndStatus(nftId)
+
+    let saleKey = getSaleKey(saleOwner,ticketId,eventId,organizerAddr,nftId)
+    let saleInfo = getStrByK(saleKey+"_OPEN")
+    if(size(saleInfo) == 0) then throw("Sale Not found!") else
+    let saleInfoArray = saleInfo.split("_")
+    if(parseInt(saleInfoArray[1]) == 0) then throw("Offer only") else
+
+    let (payment, amount) = isPayment(i)
+    let paymentAssetStr = toBase58String(value(payment.assetId))
+    if(saleInfoArray[1] != toString(amount) || saleInfoArray[2] != paymentAssetStr) then throw("Payment infos don't match.") else
+
+    let (commissions, creatorFee, ownerFee, collectorNFT) = setTransfers(amount, payment.assetId, nftId, organizerAddr, saleOwner, caller, eventId, ticketId)
+
+    [
+        DeleteEntry(saleKey+"_OPEN"),
+        DeleteEntry("sale2nd_status_"+saleOwner+"_"+nftId),
+        DeleteEntry("current_owner_on_dapp_"+nftId),
+        StringEntry(saleKey+"_"+id+"_CLOSED", saleInfo+"_CLOSED_"+toString(date)+"_"+id+"_"+caller),
+        updateNumSales(),
+        creatorFee, ownerFee, collectorNFT
+    ]++commissions
+}
+
+# OFFER
+
+@Callable(i)
+func setOffer(nftId: String) = {
+
+    let (id, offerOwner, date, isValidNFT, eventId, organizerAddr, ticketId) = provideBaseData(i, nftId)
+    if(!isValidNFT) then throw("Not a valid ticket") else
+
+    let (payment, amount) = isPayment(i)
+    let assetId = toBase58String(value(payment.assetId))
+    if(!acceptedAssetIds(assetId)) then throw("asset not accepted") else
+    if(amount == 0) then throw("Offer of 0 not allowed") else
+
+    let saleOwner = getSaleOwnerAndStatus(nftId)
+
+    [
+        StringEntry(
+            getBidKey(offerOwner,ticketId,saleOwner,id,nftId)+"_OPEN", 
+            toString(date)+"_"+toString(amount)+"_"+assetId+"_"+nftId+"_"+eventId+"_"+organizerAddr+"_"+offerOwner+"_"+id
+        )
+    ] 
+}
+
+@Callable(i)
+func acceptOffer(nftId: String, offerId: String, offerOwner: String) = {
+    let (id, caller, date, isValidNFT, eventId, organizerAddr, ticketId) = provideBaseData(i, nftId)
+    if(!isValidNFT) then throw("Not a valid ticket") else
+
+    let saleOwner = getSaleOwnerAndStatus(nftId)
+    if(caller != saleOwner) then throw("Only sale owner can accept offer") else
+
+    let bidKey = getBidKey(offerOwner,ticketId,saleOwner,offerId,nftId)
+    let (bidDataArr, assetId, bidData) = getBidData(bidKey)
+    
+    let saleKey = getSaleKey(saleOwner,ticketId,eventId,organizerAddr,nftId)
+    let saleInfo = getStrByK(saleKey+"_OPEN")
+    if(size(saleInfo) == 0) then throw("Sale Not found!") else
+    
+    let amount = value(parseInt(bidDataArr[1]))
+    let (commissions, creatorFee, ownerFee, collectorNFT) = setTransfers(amount, assetId, nftId, organizerAddr, saleOwner, bidDataArr[6], eventId, ticketId)
+
+    let assetIdStr = toBase58String(value(assetId))
+    [
+        DeleteEntry(saleKey+"_OPEN"),
+        DeleteEntry(bidKey+"_OPEN"),
+        DeleteEntry("sale2nd_status_"+saleOwner+"_"+nftId),
+        DeleteEntry("current_owner_on_dapp_"+nftId),
+        StringEntry(bidKey+"_CLOSED", bidData+"_CLOSED_"+toString(date)+"_"+id),
+        StringEntry(
+            saleKey+"_"+id+"_CLOSED", 
+            saleInfo+"_CLOSED-OFFER_"+toString(date)+"_"+id+"_"+offerOwner+"_"+toString(amount)+"_"+assetIdStr
+        ),
+        updateNumSales(),
+        creatorFee, ownerFee, collectorNFT
+    ]++commissions
+}
+
+@Callable(i)
+func cancelOffer(nftId: String, offerId: String, offerOwner: String, saleOwner: String, ticketId:String) = { 
+    let (id, caller, date) = idCallerDate(i) # caller == bidOwner or saleOwner
+    if(caller != offerOwner && caller != saleOwner) then throw("You cannot cancel this offer.") else
+    let bidKey = getBidKey(offerOwner, ticketId, saleOwner, offerId,nftId)
+    let (bidDataArr, assetId, bidData) = getBidData(bidKey)
+    [
+        DeleteEntry(bidKey+"_OPEN"),
+        StringEntry(bidKey+"_CANCELLED", bidData+"_CANCELLED_"+toString(date)+"_"+id),
+        ScriptTransfer(Address(fromBase58String(caller)), parseIntValue(bidDataArr[1]), assetId)
+    ]  
+}

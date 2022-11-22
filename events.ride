@@ -1,0 +1,496 @@
+{-# STDLIB_VERSION 6 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+{-# IMPORT artifacts/testnet.ride #-}
+
+#### VERSION 1.0.0 ####
+let VERSION = "1.0.0"
+
+# HELPERS
+func getStringByKey(key: String) =  valueOrElse(getString(this, key), "")
+let userDapp = value(addressFromString(getStringByKey("conf_users_dapp"))) # users dapp
+let feeReceiver = getStringByKey("conf_fee_receiver") # account receiving commission
+
+# ACCEPTED TOKENS 
+let signAssetId = fromBase58String(getStringByKey("conf_accepted_asset_SIGN")) # SIGN
+
+# ADMINS
+let chris = getStringByKey("conf_admin_1")
+
+# HELPERS
+func getIntegerByKey(key: String) = valueOrElse(getInteger(this, key), 0)
+func getBooleanByKey(key: String) = valueOrElse(getBoolean(this, key), false)
+
+# GET CONFIG STATUS FROM USERS DAPP 
+let dappRunning = valueOrElse(getBoolean(userDapp, "conf_dapp_is_running"), true)
+let maintenanceMSG = valueOrElse(getString(userDapp, "conf_maintenance_msg"), "")
+
+# user status
+let userSuspended = "SUSPENDED" 
+let userUnregistered = "UNREGISTERED" 
+
+func validateCID(cid: String) = { 
+  if cid.contains("/") then
+      size(cid) < 76 && size(cid.split("/")[0]) == 59 && size(cid.split("/")[1]) < 16
+  else false
+}
+
+let signCut = 2
+
+# KEYS USERS / user address
+func keyUserStatus(caller: String) = "user_status_"+caller
+
+# KEYS Event
+func keyEventOwnerByEventId(eventId: String) = "get_event_owner_"+eventId
+func keyEventAddedDate(caller: String, eventId: String) = "event_addedDate_"+eventId+"_"+caller
+func keyEventDate(caller: String, eventId: String) = "event_date_"+eventId+"_"+caller
+func keyEventName(caller: String, eventId: String) = "event_name_"+eventId+"_"+caller
+func keyEventDesc(caller: String, eventId: String) = "event_desc_"+eventId+"_"+caller
+func keyEventDisplayCid(caller: String, eventId: String) = "event_displayCid_"+eventId+"_"+caller
+func keyEventTags(caller: String, eventId: String) = "event_tags_"+eventId+"_"+caller
+func keyEventFlag(caller: String, eventId: String) = "event_flag_"+eventId+"_"+caller
+func keyEventNote(caller: String, eventId: String) = "event_note_"+eventId+"_"+caller
+func keyEventCrawler(caller: String, eventId: String) = "event_crawlerCid_"+eventId+"_"+caller
+func keyEventTotalTicketTypes(caller: String, eventId: String) = "event_totalTicketTypes_"+eventId+"_"+caller
+func keyEventTotalTicketsIssued(caller: String, eventId: String) = "event_totalIssued_"+eventId+"_"+caller
+func keyEventCanceled(caller: String, eventId: String) = "event_canceled_"+eventId+"_"+caller
+func keyEventCanceledReason(caller: String, eventId: String) = "event_canceledReason_"+eventId+"_"+caller
+func keyEventStartingPrice(caller: String, eventId: String) = "event_startingPrice_"+eventId+"_"+caller
+
+# KEYS Tickets
+func keyTicketName(caller: String, eventId: String, ticketId: String) = "ticket_name_"+eventId+"_"+caller+"_"+ticketId
+func keyTicketDesc(caller: String, eventId: String, ticketId: String) = "ticket_desc_"+eventId+"_"+caller+"_"+ticketId
+func keyTicketPrice(caller: String, eventId: String, ticketId: String) = "ticket_price_"+eventId+"_"+caller+"_"+ticketId
+func keyTicketDate(caller: String, eventId: String, ticketId: String) = "ticket_date_"+eventId+"_"+caller+"_"+ticketId
+
+func keyTicketResellLimitation(caller: String, eventId: String, ticketId: String) = "ticket_resellLimitation_"+eventId+"_"+caller+"_"+ticketId
+
+func keyTicketMaxAvailable(caller: String, eventId: String, ticketId: String) = "ticket_maxAvailable_"+eventId+"_"+caller+"_"+ticketId
+func keyTicketOnSale(caller: String, eventId: String, ticketId: String) = "ticket_onSale_"+eventId+"_"+caller+"_"+ticketId
+func keyTicketAmountUsed(caller: String, eventId: String, ticketId: String, nftId: String) = "ticket_amountUsed_"+eventId+"_"+caller+"_"+ticketId+"_"+nftId
+func keyTicketHistoryUsed(caller: String, eventId: String, ticketId: String, nftId: String, usageIndex: String) = "ticket_historyUsed_"+eventId+"_"+caller+"_"+ticketId+"_"+nftId+"_"+usageIndex
+func keyTicketMaxUse(caller: String, eventId: String, ticketId: String) = "ticket_maxUse_"+eventId+"_"+caller+"_"+ticketId
+func keyTicketTotalIssued(caller: String, eventId: String, ticketId: String) = "ticket_totalIssued_"+eventId+"_"+caller+"_"+ticketId
+func keyTicketRoyalty(caller: String, eventId: String, ticketId: String) = "ticket_royalties_"+eventId+"_"+caller+"_"+ticketId
+
+# SINGLE VALIDATION
+func validateString(str: String, max: Int) = {
+    if(size(str) == 0) then throw("Field cannot be is empty")
+    else if(size(str) > max) then throw(str+" is too long")
+    else true
+}
+
+func validateInt(num: Int) = {
+    num < 0
+}
+
+func getEventOwnerByEventId(eventId: String) = {
+  valueOrElse(getString(this, keyEventOwnerByEventId(eventId)), "")
+}
+
+# Check if user is registered
+func validateUser(caller: String) = {
+    let userStatus = valueOrElse(getString(userDapp, keyUserStatus(caller)), userUnregistered)
+    if(userStatus == userUnregistered) then "Register this account first with \"Account\" tab"
+    else if(userStatus == userSuspended) then "Account suspended" else
+    ""
+}
+
+func validateEventData(caller: String, cidDisplay: String, name: String, description: String, tags: String, date: String) = {
+    let checkUser = validateUser(caller)
+    if(checkUser != "") then throw(checkUser) else
+
+    if(size(cidDisplay) == 0) then throw("Display CID cannot be empty") else
+
+    if(!validateCID(cidDisplay)) then throw("Problem with CID") else
+    
+    if(!validateString(name, 300)) then throw("300 Char. max name") else 
+    if(!validateString(description, 3000)) then throw("3000 Char. max description") else 
+    if(!validateString(date, 1000)) then throw("1000 Char. max date") else 
+
+    if(tags.split(",").size() > 5) then throw("5 tags max.")
+    else ""   
+}
+
+func validateTicketData(eventId: String, caller: String, name: String, description: String, price: Int, maxAvailable: Int, maxUse: Int, resellLimitation: Int) = {
+    let checkUser = validateUser(caller)
+    if(checkUser != "") then throw(checkUser) else
+    
+    if(!validateString(name, 200)) then throw("100 Char. max name") else 
+    if(!validateString(description, 1000)) then throw("1000 Char. max description") else 
+
+    if(validateInt(price) || validateInt(maxUse) || validateInt(maxAvailable) || validateInt(resellLimitation)) then throw("Positive amount only") else
+
+    if(!validateString(description, 1000)) then throw("1000 Char. max description") 
+    else ""   
+}
+
+func idCallerDate(i: Invocation) = {
+    if(!dappRunning) then throw(maintenanceMSG) else
+    (toBase58String(i.transactionId), toBase58String(i.caller.bytes), lastBlock.timestamp)
+}
+
+func isPayment(i: Invocation) = {
+    if(size(i.payments) == 0) then throw("No payment attached") else
+    let payment = value(i.payments[0])
+    let amount = value(payment.amount)
+    (payment, amount)
+}
+
+func validatePriceAssetId(i: Invocation, priceAssetId: String, artworkPrice: Int) = {
+    let (payment, amount) = isPayment(i)
+    if(!isDefined(payment.assetId)) then throw("Wrong asset attached") else
+    let assetId =  if (size(priceAssetId) > 0 && toBase58String(value(payment.assetId)) == priceAssetId) then payment.assetId else throw("Wrong asset attached")
+    if(artworkPrice != amount) then throw("Payment amount don't match") else
+    (amount, assetId)
+}
+
+func isEventOwner(eventId: String, caller: String) = {
+  let eventOwner = getEventOwnerByEventId(eventId)
+  if(eventOwner == "") then throw("Event not found") else
+  eventOwner == caller
+}
+
+func ticketExist(caller: String, eventId: String, ticketId: String) = {
+  let ticket = getStringByKey(keyTicketName(caller, eventId, ticketId))
+  size(ticket) != 0
+}
+
+func eventIsCanceled(issuer: String, eventId: String) = {
+  getBooleanByKey(keyEventCanceled(issuer, eventId)) 
+}
+@Callable(invoke)
+func setConf(key: String, val: String) = {
+  let caller = toString(invoke.caller)
+  # first set admin with dapp account
+  if([chris, toString(this)].containsElement(caller)) then
+    if(key.contains("conf_")) then
+      [
+        StringEntry(key, val)
+      ]
+    else throw("Entries starting with conf_ only")
+  else throw("You are not allowed to change this")
+}
+
+@Callable(i)
+func addEvent(name: String, description: String, tags: String, cidDisplay: String, crawler: String, date: String) = {
+    let (eventId, caller, addedDate) = idCallerDate(i)
+    let checkUser = validateUser(caller)
+    if(checkUser != "") then throw(checkUser) else
+
+    let validateEvent = validateEventData(caller, cidDisplay, name, description, tags, date)
+    if(validateEvent != "") then throw("Something went wrong!") else
+      [ 
+        IntegerEntry(keyEventAddedDate(caller, eventId), addedDate), 
+        StringEntry(keyEventDate(caller, eventId), date), 
+        StringEntry(keyEventName(caller, eventId), name), 
+        StringEntry(keyEventDesc(caller, eventId), description), 
+        StringEntry(keyEventDisplayCid(caller, eventId), cidDisplay), 
+        StringEntry(keyEventTags(caller, eventId), tags), 
+        StringEntry(keyEventCrawler(caller, eventId), crawler),
+        IntegerEntry(keyEventTotalTicketsIssued(caller, eventId), 0),
+        BooleanEntry(keyEventCanceled(caller, eventId), false),
+        StringEntry(keyEventOwnerByEventId(eventId), caller)
+      ]
+}
+
+@Callable(i)
+func editEvent(eventId: String, name: String, description: String, tags: String, cidDisplay: String, crawler: String, date: String) = {
+    
+    if(!dappRunning) then throw(maintenanceMSG) else
+    let caller = toBase58String(i.caller.bytes)
+    let checkUser = validateUser(caller)
+    if(checkUser != "") then throw(checkUser) else
+
+    let validateEvent = validateEventData(caller, cidDisplay, name, description, tags, date)
+    if(validateEvent != "") then throw("Something went wrong!") else
+
+    let entryExist = getStringByKey(keyEventName(caller, eventId))
+    if(entryExist == "") then throw("Entry not found")
+    else
+
+    let flag = getStringByKey(keyEventFlag(caller, eventId))
+    if(flag == "ILLEGAL") then throw("Cannot update ILLEGAL Event") else
+
+      [ 
+          StringEntry(keyEventName(caller, eventId), name), 
+          StringEntry(keyEventDate(caller, eventId), date), 
+          StringEntry(keyEventDesc(caller, eventId), description), 
+          StringEntry(keyEventTags(caller, eventId), tags), 
+          StringEntry(keyEventDisplayCid(caller, eventId), cidDisplay), 
+          StringEntry(keyEventCrawler(caller, eventId), crawler) 
+      ]
+
+}
+
+@Callable(i)
+func deleteEvent(eventId: String) = {
+    let (id, caller, addedDate) = idCallerDate(i)
+    let checkUser = validateUser(caller)
+    if(checkUser != "") then throw(checkUser) else
+
+    if !isEventOwner(eventId, caller) then throw("You are not the owner of this event") else
+
+    let eventTotalNFT = getIntegerByKey(keyEventTotalTicketsIssued(caller, eventId))
+    if eventTotalNFT != 0 then throw("Cannot delete event with already sold tickets") else
+
+    let totalTicketTypeForEvent = getIntegerByKey(keyEventTotalTicketTypes(caller, eventId))
+    if(totalTicketTypeForEvent > 0) then throw("Delete all tickets first") else
+
+      [ 
+        DeleteEntry(keyEventAddedDate(caller, eventId)), 
+        DeleteEntry(keyEventDate(caller, eventId)), 
+        DeleteEntry(keyEventName(caller, eventId)), 
+        DeleteEntry(keyEventDesc(caller, eventId)),
+        DeleteEntry(keyEventDisplayCid(caller, eventId)),
+        DeleteEntry(keyEventTags(caller, eventId)),
+        DeleteEntry(keyEventCrawler(caller, eventId)),
+        DeleteEntry(keyEventTotalTicketsIssued(caller, eventId)),
+        DeleteEntry(keyEventCanceled(caller, eventId)),
+        DeleteEntry(keyEventOwnerByEventId(eventId)),
+        DeleteEntry(keyEventTotalTicketTypes(caller, eventId))
+      ]
+}
+
+@Callable(i)
+func cancelEvent(eventId: String, reason: String) = {
+    let (id, caller, addedDate) = idCallerDate(i)
+    let checkUser = validateUser(caller)
+    if(checkUser != "") then throw(checkUser) else
+
+    if !isEventOwner(eventId, caller) then throw("You are not the owner of this event") else
+
+      [ 
+        BooleanEntry(keyEventCanceled(caller, eventId), true),
+        StringEntry(keyEventCanceledReason(caller, eventId), reason)
+      ]
+}
+
+@Callable(i)
+func flagEvent(eventId: String, addr: String, flag: String, note: String) = {
+    let (id, caller) = idCallerDate(i)
+    if([chris, toString(this)].containsElement(caller)) then
+        if(["", "CHANGE_REQUIRED", "FLAGGED", "ILLEGAL"].containsElement(flag)) then
+        [
+            StringEntry(keyEventFlag(addr, eventId), flag),
+            StringEntry(keyEventNote(addr, eventId), note)
+        ]
+        else throw("Unknow status "+flag)
+    else throw("You are not allowed")
+}
+
+@Callable(i)
+func addTicket(eventId: String, name: String, description: String, price: Int, maxAvailable: Int, MaxUse: Int, Royalties: Int, resellLimitation: Int) = {
+    let (id, caller, date) = idCallerDate(i)
+    let checkUser = validateUser(caller)
+    if(checkUser != "") then throw(checkUser) else
+
+    if eventIsCanceled(caller, eventId) then throw("Event have been canceled") else
+   
+    if !isEventOwner(eventId, caller) then throw("You are not the owner of this event") else
+    
+    let validateTicket = validateTicketData(eventId, caller, name, description, price, maxAvailable, MaxUse, resellLimitation)
+    if(validateTicket != "") then throw("Something went wrong!") else
+
+    let totalTicketTypeForEvent = getIntegerByKey(keyEventTotalTicketTypes(caller, eventId))
+
+    [
+      StringEntry(keyTicketName(caller, eventId, id), name),
+      IntegerEntry(keyTicketDate(caller, eventId, id), date),
+      StringEntry(keyTicketDesc(caller, eventId, id), description),
+      IntegerEntry(keyTicketPrice(caller, eventId, id), price),
+      IntegerEntry(keyTicketMaxAvailable(caller, eventId, id), maxAvailable),
+      BooleanEntry(keyTicketOnSale(caller, eventId, id), true),
+      IntegerEntry(keyTicketMaxUse(caller, eventId, id), MaxUse),
+      IntegerEntry(keyTicketTotalIssued(caller, eventId, id), 0),
+      IntegerEntry(keyEventTotalTicketTypes(caller, eventId), totalTicketTypeForEvent+1),
+      IntegerEntry(keyTicketRoyalty(caller, eventId, id), Royalties),
+      IntegerEntry(keyTicketResellLimitation(caller, eventId, id), resellLimitation)
+    ]
+}
+
+@Callable(i)
+func editTicket(ticketId: String, eventId: String, name: String, description: String, price: Int, maxAvailable: Int, maxUse: Int, Royalties: Int, resellLimitation: Int) = {
+    let (id, caller, date) = idCallerDate(i)
+
+    let checkUser = validateUser(caller)
+    if(checkUser != "") then throw(checkUser) else
+    
+    if !isEventOwner(eventId, caller) then throw("You are not the owner of this event") else
+    if !ticketExist(caller, eventId, ticketId) then throw("Ticket not found") else
+
+    let validateTicket = validateTicketData(eventId, caller, name, description, price, maxAvailable, maxUse, resellLimitation)
+    if(validateTicket != "") then throw("Something went wrong!") else
+
+    let ticketSold = valueOrElse(getInteger(keyTicketTotalIssued(caller, eventId, ticketId)), 0)
+    if(maxAvailable < ticketSold) then throw("Max tickets available cannot be lower than amount already sold") else
+
+    [
+      StringEntry(keyTicketName(caller, eventId, ticketId), name),
+      StringEntry(keyTicketDesc(caller, eventId, ticketId), description),
+      IntegerEntry(keyTicketPrice(caller, eventId, ticketId), price),
+      IntegerEntry(keyTicketMaxAvailable(caller, eventId, ticketId), maxAvailable),
+      IntegerEntry(keyTicketMaxUse(caller, eventId, ticketId), maxUse),
+      IntegerEntry(keyTicketRoyalty(caller, eventId, ticketId), Royalties),
+      IntegerEntry(keyTicketResellLimitation(caller, eventId, ticketId), resellLimitation)
+    ]
+}
+
+@Callable(i)
+func pauseTicketSale(eventId: String, ticketId: String, status: Boolean) = {
+    let (id, caller, date) = idCallerDate(i)
+    
+    let checkUser = validateUser(caller)
+    if(checkUser != "") then throw(checkUser) else
+
+    if !isEventOwner(eventId, caller) then throw("You are not the owner of this event") else
+    if !ticketExist(caller, eventId, ticketId) then throw("Ticket not found") else
+
+    [
+      BooleanEntry(keyTicketOnSale(caller, eventId, ticketId), status)
+    ]
+}
+
+# delete ticket (if no sold)
+@Callable(i)
+func deleteTicket(ticketId: String, eventId: String) = {
+  let (id, caller, date) = idCallerDate(i)
+  let checkUser = validateUser(caller)
+  if(checkUser != "") then throw(checkUser) else
+
+  if !isEventOwner(eventId, caller) then throw("You are not the owner of this event") else
+  if !ticketExist(caller, eventId, ticketId) then throw("Ticket not found") else
+
+  let amountSold = getIntegerByKey(keyTicketTotalIssued(caller, eventId, ticketId))
+  if(amountSold!=0) then throw("Cannot delete ticket that sold already") else
+
+  let totalTicketTypeForEvent = getIntegerByKey(keyEventTotalTicketTypes(caller, eventId))
+
+  [
+      DeleteEntry(keyTicketName(caller, eventId, ticketId)),
+      DeleteEntry(keyTicketDate(caller, eventId, ticketId)),
+      DeleteEntry(keyTicketDesc(caller, eventId, ticketId)),
+      DeleteEntry(keyTicketPrice(caller, eventId, ticketId)),
+      DeleteEntry(keyTicketMaxAvailable(caller, eventId, ticketId)),
+      DeleteEntry(keyTicketOnSale(caller, eventId, ticketId)),
+      DeleteEntry(keyTicketMaxUse(caller, eventId, ticketId)),
+      DeleteEntry(keyTicketTotalIssued(caller, eventId, ticketId)),
+      DeleteEntry(keyTicketRoyalty(caller, eventId, ticketId)),
+      DeleteEntry(keyTicketResellLimitation(caller, eventId, ticketId)),
+      IntegerEntry(keyEventTotalTicketTypes(caller, eventId), totalTicketTypeForEvent-1)
+    ]
+}
+
+@Callable(i)
+func buyTicket(ticketId: String, eventId: String, issuer: String) = {
+    # call info
+    let (id, caller, date) = idCallerDate(i)
+    let totalNFT = valueOrElse(getIntegerByKey("total_tickets_issued"), 0)
+
+    if !isEventOwner(eventId, issuer) then throw("Event ID and Issuer don't match") else
+
+    if !ticketExist(issuer, eventId, ticketId) then throw("Ticket not found") else
+
+    # GET ARTWORK DATA
+    let eventName = getStringByKey(keyEventName(issuer, eventId)) 
+    if(eventName == "") then throw("Art doesn't exist") else
+
+    if eventIsCanceled(issuer, eventId) then throw("Event have been canceled") else
+    
+    let isOnSale = getBooleanByKey(keyTicketOnSale(issuer, eventId, ticketId))
+    if(!isOnSale) then throw("Tickets not for sale") else
+
+    let amountSold = getIntegerByKey(keyTicketTotalIssued(issuer, eventId, ticketId))
+    let ticketPrice = getIntegerByKey(keyTicketPrice(issuer, eventId, ticketId))
+    let priceAssetId = toBase58String(signAssetId)
+
+    let (amount, assetId) = validatePriceAssetId(i, priceAssetId, ticketPrice)
+
+    let maxCanSell = getIntegerByKey(keyTicketMaxAvailable(issuer, eventId, ticketId))
+
+    # GET COMMISSION DATA
+    let amountForSign = fraction(amount, signCut, 100)
+    let amountForOrganizer = amount - amountForSign
+    if(amountSold == maxCanSell) then throw("Art sold out") else
+    let newAmountSold = amountSold+1
+
+    # Issue NFT info
+    let issueMeta = "Organizer: "+issuer+",\n EventID: "+eventId+",\n TicketID: "+ticketId+",\n EventName: "+eventName+",\n Issue: "+toString(newAmountSold)+"/"+toString(maxCanSell)
+    let issueNFT = Issue("ST_"+toString(totalNFT+1), issueMeta, 1, 0, false) 
+    let idNFT = issueNFT.calculateAssetId()
+    let sellStatus = if(newAmountSold == maxCanSell) then false else true
+    let receiveNFT = i.caller
+
+    # Sale entries
+    let soldKey = "ticket_sold_"+toString(newAmountSold)+"_of_"+toString(maxCanSell)+"_"+ticketId+"_"+eventId+"_"+issuer+"_"+toBase58String(idNFT)
+    let soldValue = toString(receiveNFT)+"_"+toString(date)+"_"+id+"_"+toString(amount)+"_"+toBase58String(idNFT) 
+    let soldData = StringEntry(soldKey, soldValue)
+
+    let eventTotalNFT = getIntegerByKey(keyEventTotalTicketsIssued(issuer, eventId))
+    let ticketTotalNFT = getIntegerByKey(keyTicketTotalIssued(issuer, eventId, ticketId))
+
+    let buyRes = [
+
+        StringEntry("nft_"+toBase58String(idNFT), soldKey),
+        IntegerEntry("total_tickets_issued", totalNFT+1),
+
+        IntegerEntry(keyEventTotalTicketsIssued(issuer, eventId), eventTotalNFT+1),
+        IntegerEntry(keyTicketTotalIssued(issuer, eventId, ticketId), newAmountSold),
+
+        StringEntry("ST_"+toString(totalNFT+1)+"_assetId", ticketId+"_"+toBase58String(idNFT)),
+        BooleanEntry(keyTicketOnSale(issuer, eventId, ticketId), sellStatus),
+        IntegerEntry(keyTicketAmountUsed(issuer, eventId, ticketId, toBase58String(idNFT)), 0),
+        issueNFT,
+        ScriptTransfer(Address(fromBase58String(issuer)), amountForOrganizer, assetId),
+        ScriptTransfer(receiveNFT, 1, idNFT),
+        ScriptTransfer(Address(fromBase58String(feeReceiver)), amountForSign, assetId)
+    ]
+
+    cons(soldData, buyRes)
+}
+
+@Callable(i)
+func useTicket() = {
+
+    let (id, caller, date) = idCallerDate(i)
+
+    let (payment, amount) = isPayment(i)
+    if(!isDefined(payment.assetId)) then throw("Wrong asset attached") else
+
+    let eventData = getStringByKey("nft_"+toBase58String(value(payment.assetId)))
+    if(size(eventData) == 0) then throw("Something went wrong") else
+    let eventDataArr = split(eventData, "_")
+    let issuer = eventDataArr[7]
+    let eventId = eventDataArr[6]
+    let ticketId = eventDataArr[5]
+
+    if !ticketExist(issuer, eventId, ticketId) then throw("Ticket not found") else
+
+    let amountUsed = getIntegerByKey(keyTicketAmountUsed(issuer, eventId, ticketId, toBase58String(value(payment.assetId))))
+    let maxUsingTime = getIntegerByKey(keyTicketMaxUse(issuer, eventId, ticketId))
+    if(maxUsingTime == amountUsed) then throw("Ticket used "+toString(amountUsed)+" times already") else
+
+    # check first user, if multi usage ticket and already used at least once, cannot be used by someone else to avoid abuse
+    let initUseData = getStringByKey(keyTicketHistoryUsed(issuer, eventId, ticketId, toBase58String(value(payment.assetId)), "1"))
+    let firstUseAddr = if maxUsingTime > 1 && amountUsed >= 1 && initUseData != "" then initUseData.split("_")[1] else caller
+    if( firstUseAddr != caller) then throw("You are not the initial user of this ticket. ") else
+    
+    [
+      IntegerEntry(keyTicketAmountUsed(issuer, eventId, ticketId, toBase58String(value(payment.assetId))), amountUsed+1),
+      StringEntry(keyTicketHistoryUsed(issuer, eventId, ticketId, toBase58String(value(payment.assetId)), toString(amountUsed+1)), id+"_"+caller+"_"+toString(date)+"_"+toString(amountUsed+1)),
+      ScriptTransfer(Address(fromBase58String(caller)), 1, payment.assetId)
+    ]
+}
+
+##### /BID #############
+
+# DEBUG ONLY
+@Callable(i)
+ func deleteEntry(entry: String) = {
+       let caller = toString(i.caller)
+       if(caller == chris) then
+      [
+           DeleteEntry(entry)
+       ]
+       else throw("no")
+  }
